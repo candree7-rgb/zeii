@@ -7,17 +7,20 @@ from dotenv import load_dotenv
 load_dotenv()
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
-CHANNEL_ID = os.getenv("CHANNEL_ID", "").strip()
-ZAPIER_WEBHOOK = os.getenv("ZAPIER_WEBHOOK", "").strip()
+CHANNEL_ID    = os.getenv("CHANNEL_ID", "").strip()
 
-# NEU: exakte Taktung
-POLL_BASE = int(os.getenv("POLL_BASE_SECONDS", "300"))   # 5 min
-POLL_OFFSET = int(os.getenv("POLL_OFFSET_SECONDS", "5"))  # +5 sec
+# mindestens WEBHOOK_1 erforderlich; WEBHOOK_2 optional
+WEBHOOK_1 = os.getenv("WEBHOOK_1", "").strip()
+WEBHOOK_2 = os.getenv("WEBHOOK_2", "").strip()
+
+# Exakte Taktung: alle 5 Min + 5 Sek (standard)
+POLL_BASE   = int(os.getenv("POLL_BASE_SECONDS", "300"))   # 5 min
+POLL_OFFSET = int(os.getenv("POLL_OFFSET_SECONDS", "5"))   # +5 sec
 
 STATE_FILE = Path("state.json")
 
-if not DISCORD_TOKEN or not CHANNEL_ID or not ZAPIER_WEBHOOK:
-    print("Bitte ENV Variablen setzen: DISCORD_TOKEN, CHANNEL_ID, ZAPIER_WEBHOOK.")
+if not DISCORD_TOKEN or not CHANNEL_ID or not WEBHOOK_1:
+    print("Bitte ENV Variablen setzen: DISCORD_TOKEN, CHANNEL_ID, WEBHOOK_1.")
     sys.exit(1)
 
 HEADERS = {
@@ -54,7 +57,7 @@ def fetch_latest_messages(channel_id, limit=5):
     data_sorted = sorted(data, key=lambda m: int(m["id"]))
     return data_sorted
 
-def forward_to_zapier(msg):
+def forward_to_webhooks(msg):
     payload = {
         "channel_id": msg.get("channel_id"),
         "message_id": msg.get("id"),
@@ -69,8 +72,15 @@ def forward_to_zapier(msg):
         "attachments": msg.get("attachments", []),
         "embeds": msg.get("embeds", []),
     }
-    requests.post(ZAPIER_WEBHOOK, json=payload, timeout=15)
-    print(f"[→ Zapier] {msg.get('id')} | {payload['content'][:100]!r}")
+
+    urls = [WEBHOOK_1] + ([WEBHOOK_2] if WEBHOOK_2 else [])
+    for idx, url in enumerate(urls, start=1):
+        try:
+            r = requests.post(url, json=payload, timeout=15)
+            r.raise_for_status()
+            print(f"[→ Webhook{idx}] {msg.get('id')} OK | {payload['content'][:80]!r}")
+        except Exception as ex:
+            print(f"[→ Webhook{idx}] FAIL: {ex}")
 
 def sleep_until_next_tick():
     """
@@ -78,9 +88,9 @@ def sleep_until_next_tick():
     basierend auf Unix-Zeit (Serverzeit).
     """
     now = time.time()
-    period_start = (now // POLL_BASE) * POLL_BASE  # Start dieses 5-Min-Blocks
+    period_start = (now // POLL_BASE) * POLL_BASE  # Start dieses Blocks
     next_tick = period_start + POLL_BASE + POLL_OFFSET
-    # Falls wir sehr nah dran sind (Start direkt auf Tick), nicht doppelt schlafen:
+    # Falls wir vor dem ersten Offset im aktuellen Block sind:
     if now < period_start + POLL_OFFSET:
         next_tick = period_start + POLL_OFFSET
     sleep_s = max(0, next_tick - now)
@@ -91,12 +101,11 @@ def main():
     state = load_state()
     last_id = state.get("last_id")
 
-    # Sofort auf den nächsten exakten Tick ausrichten
+    # Auf ersten exakten Tick ausrichten
     sleep_until_next_tick()
 
     while True:
         try:
-            # --- POLL ---
             msgs = fetch_latest_messages(CHANNEL_ID, limit=5)
 
             new_msgs = []
@@ -107,7 +116,7 @@ def main():
 
             if new_msgs:
                 for m in new_msgs:  # älteste zuerst
-                    forward_to_zapier(m)
+                    forward_to_webhooks(m)
                 last_id = new_msgs[-1]["id"]
                 state["last_id"] = last_id
                 save_state(state)
@@ -126,7 +135,6 @@ def main():
             print("[ERROR]")
             traceback.print_exc()
 
-        # exakt bis zum nächsten „xx:00:05 / xx:05:05 / …“ schlafen
         sleep_until_next_tick()
 
 if __name__ == "__main__":
