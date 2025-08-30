@@ -9,7 +9,10 @@ load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
 CHANNEL_ID = os.getenv("CHANNEL_ID", "").strip()
 ZAPIER_WEBHOOK = os.getenv("ZAPIER_WEBHOOK", "").strip()
-POLL_INTERVAL = int(os.getenv("POLL_INTERVAL_SECONDS", "305"))
+
+# NEU: exakte Taktung
+POLL_BASE = int(os.getenv("POLL_BASE_SECONDS", "300"))   # 5 min
+POLL_OFFSET = int(os.getenv("POLL_OFFSET_SECONDS", "5"))  # +5 sec
 
 STATE_FILE = Path("state.json")
 
@@ -39,10 +42,11 @@ def fetch_latest_messages(channel_id, limit=5):
     url = f"https://discord.com/api/v9/channels/{channel_id}/messages?limit={limit}"
     r = requests.get(url, headers=HEADERS, timeout=15)
     if r.status_code == 429:
+        retry = 5
         try:
             retry = r.json().get("retry_after", 5)
         except Exception:
-            retry = 5
+            pass
         time.sleep(retry + 1)
         r = requests.get(url, headers=HEADERS, timeout=15)
     r.raise_for_status()
@@ -68,14 +72,33 @@ def forward_to_zapier(msg):
     requests.post(ZAPIER_WEBHOOK, json=payload, timeout=15)
     print(f"[→ Zapier] {msg.get('id')} | {payload['content'][:100]!r}")
 
+def sleep_until_next_tick():
+    """
+    Schläft exakt bis zum nächsten (n*POLL_BASE + POLL_OFFSET)-Zeitpunkt,
+    basierend auf Unix-Zeit (Serverzeit).
+    """
+    now = time.time()
+    period_start = (now // POLL_BASE) * POLL_BASE  # Start dieses 5-Min-Blocks
+    next_tick = period_start + POLL_BASE + POLL_OFFSET
+    # Falls wir sehr nah dran sind (Start direkt auf Tick), nicht doppelt schlafen:
+    if now < period_start + POLL_OFFSET:
+        next_tick = period_start + POLL_OFFSET
+    sleep_s = max(0, next_tick - now)
+    time.sleep(sleep_s)
+
 def main():
-    print(f"Polling Channel {CHANNEL_ID} alle {POLL_INTERVAL}s …")
+    print(f"Getaktet: alle {POLL_BASE}s, jeweils +{POLL_OFFSET}s Offset (z. B. 10:00:05, 10:05:05, …)")
     state = load_state()
     last_id = state.get("last_id")
 
+    # Sofort auf den nächsten exakten Tick ausrichten
+    sleep_until_next_tick()
+
     while True:
         try:
+            # --- POLL ---
             msgs = fetch_latest_messages(CHANNEL_ID, limit=5)
+
             new_msgs = []
             for m in msgs:
                 mid = m.get("id")
@@ -88,8 +111,11 @@ def main():
                 last_id = new_msgs[-1]["id"]
                 state["last_id"] = last_id
                 save_state(state)
+                ts = datetime.now().strftime("%H:%M:%S")
+                print(f"[{ts}] {len(new_msgs)} neue Nachricht(en) verarbeitet.")
             else:
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] Keine neuen Nachrichten.")
+                ts = datetime.now().strftime("%H:%M:%S")
+                print(f"[{ts}] Keine neuen Nachrichten.")
 
         except KeyboardInterrupt:
             print("\nStopped.")
@@ -100,7 +126,8 @@ def main():
             print("[ERROR]")
             traceback.print_exc()
 
-        time.sleep(POLL_INTERVAL)
+        # exakt bis zum nächsten „xx:00:05 / xx:05:05 / …“ schlafen
+        sleep_until_next_tick()
 
 if __name__ == "__main__":
     main()
